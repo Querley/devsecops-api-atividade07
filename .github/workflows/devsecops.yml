@@ -37,7 +37,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Pytest
-        run: pytest -v
+        run: python -m pytest -v
 
   # ---------------------------------------------------------------------------
   # 1. Varredura de Segredos (Secret Scanning) - Gitleaks
@@ -87,29 +87,19 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy SCA (Block HIGH/CRITICAL CVEs)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          exit-code: "1"
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 /work
 
       - name: Generate Application SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: cyclonedx
-          output: sbom-app-cyclonedx.json
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            fs --format cyclonedx --output /work/sbom-app-cyclonedx.json /work
 
       - name: Generate Application SBOM (SPDX)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: spdx-json
-          output: sbom-app-spdx.json
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            fs --format spdx-json --output /work/sbom-app-spdx.json /work
 
       - name: Upload Application SBOM Artifacts
         uses: actions/upload-artifact@v4
@@ -134,12 +124,9 @@ jobs:
           docker run --rm -i hadolint/hadolint:latest hadolint --failure-threshold error - < Dockerfile
 
       - name: Scan IaC & Container Config with Trivy (Block HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: config
-          scan-ref: .
-          severity: HIGH,CRITICAL
-          exit-code: "1"
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            config --severity HIGH,CRITICAL --exit-code 1 /work
 
       - name: Scan Dockerfile & Terraform with Checkov
         uses: bridgecrewio/checkov-action@v12
@@ -165,27 +152,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build hardened Docker image
-        run: docker build -t devsecops-api:${{ github.sha }} .
+      - name: Build and export hardened Docker image
+        run: |
+          docker build -t devsecops-api:${{ github.sha }} .
+          docker save devsecops-api:${{ github.sha }} -o devsecops-api.tar
 
       - name: Scan Docker image for HIGH/CRITICAL CVEs (Security Gate)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: devsecops-api:${{ github.sha }}
-          format: table
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            image --input /work/devsecops-api.tar --format table --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
 
       - name: Generate Container SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: devsecops-api:${{ github.sha }}
-          format: cyclonedx
-          output: sbom-container-cyclonedx.json
-
-      - name: Save Docker image for DAST stage
-        run: docker save devsecops-api:${{ github.sha }} -o devsecops-api.tar
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" aquasec/trivy:latest \
+            image --input /work/devsecops-api.tar --format cyclonedx --output /work/sbom-container-cyclonedx.json
 
       - name: Upload Container Image & SBOM Artifacts
         uses: actions/upload-artifact@v4
