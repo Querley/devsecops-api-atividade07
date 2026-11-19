@@ -49,6 +49,16 @@ _ITEMS_DB: Dict[int, Item] = {
 _NEXT_ID = 3
 
 
+@app.get("/", status_code=status.HTTP_200_OK)
+def root() -> Dict[str, str]:
+    """Root endpoint with API navigation."""
+    return {
+        "service": "DevSecOps Secure API",
+        "health": "/health",
+        "items": "/api/v1/items",
+    }
+
+
 @app.get("/health", status_code=status.HTTP_200_OK)
 def health_check() -> Dict[str, str]:
     """Healthcheck endpoint for container orchestration and DAST readiness."""
