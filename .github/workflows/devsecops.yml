@@ -1,0 +1,285 @@
+name: DevSecOps Security CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "demo/**"
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 0. Testes Automatizados da Aplicacao
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: 0. Unit Tests (Pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Pytest
+        run: pytest -v
+
+  # ---------------------------------------------------------------------------
+  # 1. Varredura de Segredos (Secret Scanning) - Gitleaks
+  # ---------------------------------------------------------------------------
+  secret-scanning:
+    name: 1. Secret Scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Gitleaks (Security Gate - Exit 1 on leak)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            ghcr.io/gitleaks/gitleaks:latest \
+            detect --source /repo --no-git --verbose --redact --exit-code 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Analise Estatica de Seguranca (SAST) - Semgrep
+  # ---------------------------------------------------------------------------
+  sast:
+    name: 2. SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST (Security Gate - Error on findings)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/src" \
+            semgrep/semgrep:latest \
+            semgrep scan \
+            --config p/python \
+            --config p/owasp-top-ten \
+            --config p/security-audit \
+            --error \
+            /src/app
+
+  # ---------------------------------------------------------------------------
+  # 3. Seguranca na Cadeia de Suprimentos (SCA & SBOM) - Trivy
+  # ---------------------------------------------------------------------------
+  sca-and-sbom:
+    name: 3. SCA & SBOM (Trivy CycloneDX/SPDX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy SCA (Block HIGH/CRITICAL CVEs)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Generate Application SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: sbom-app-cyclonedx.json
+
+      - name: Generate Application SBOM (SPDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: spdx-json
+          output: sbom-app-spdx.json
+
+      - name: Upload Application SBOM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-sbom-artifacts
+          path: |
+            sbom-app-cyclonedx.json
+            sbom-app-spdx.json
+
+  # ---------------------------------------------------------------------------
+  # 4. Seguranca de Conteinerizacao & IaC - Hadolint, Checkov & Trivy Config
+  # ---------------------------------------------------------------------------
+  iac-and-dockerfile-security:
+    name: 4. IaC & Dockerfile Security (Hadolint + Checkov + Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile with Hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint:latest hadolint --failure-threshold error - < Dockerfile
+
+      - name: Scan IaC & Container Config with Trivy (Block HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Scan Dockerfile & Terraform with Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: dockerfile,terraform
+          check: CKV_DOCKER_2,CKV_DOCKER_3,CKV_AWS_19,CKV_AWS_20,CKV_AWS_21,CKV_AWS_53,CKV_AWS_54,CKV_AWS_55,CKV_AWS_56,CKV_AWS_24
+          soft_fail: false
+
+  # ---------------------------------------------------------------------------
+  # 5. Build & Varredura da Imagem de Conteiner (Trivy Image + Container SBOM)
+  # ---------------------------------------------------------------------------
+  container-build-and-scan:
+    name: 5. Container Image Scan & SBOM (Trivy)
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+      - secret-scanning
+      - sast
+      - sca-and-sbom
+      - iac-and-dockerfile-security
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build hardened Docker image
+        run: docker build -t devsecops-api:${{ github.sha }} .
+
+      - name: Scan Docker image for HIGH/CRITICAL CVEs (Security Gate)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: devsecops-api:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Generate Container SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: devsecops-api:${{ github.sha }}
+          format: cyclonedx
+          output: sbom-container-cyclonedx.json
+
+      - name: Save Docker image for DAST stage
+        run: docker save devsecops-api:${{ github.sha }} -o devsecops-api.tar
+
+      - name: Upload Container Image & SBOM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-and-sbom
+          path: |
+            devsecops-api.tar
+            sbom-container-cyclonedx.json
+
+  # ---------------------------------------------------------------------------
+  # 6. Analise Dinamica de Seguranca (DAST) - OWASP ZAP + HTTP Resilience
+  # ---------------------------------------------------------------------------
+  dast:
+    name: 6. DAST (OWASP ZAP & Security Headers)
+    runs-on: ubuntu-latest
+    needs: container-build-and-scan
+    steps:
+      - name: Download scanned container image
+        uses: actions/download-artifact@v4
+        with:
+          name: container-and-sbom
+
+      - name: Load Docker image and start ephemeral container
+        run: |
+          docker load -i devsecops-api.tar
+          docker run -d --name dast-target -p 127.0.0.1:8000:8000 devsecops-api:${{ github.sha }}
+
+      - name: Wait for API /health readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo "API is healthy!"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs dast-target
+          exit 1
+
+      - name: Verify HTTP Security Headers & Endpoint Resilience
+        run: |
+          HEADERS=$(curl -sI http://127.0.0.1:8000/health)
+          echo "$HEADERS"
+          echo "$HEADERS" | grep -qi "X-Content-Type-Options: nosniff"
+          echo "$HEADERS" | grep -qi "X-Frame-Options: DENY"
+          echo "$HEADERS" | grep -qi "Content-Security-Policy:"
+          echo "$HEADERS" | grep -qi "Strict-Transport-Security:"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8000/api/v1/items \
+            -H "Content-Type: application/json" \
+            -d '{"name":"<script>alert(1)</script>","category":"XSS","price":-1}')
+          echo "Invalid payload HTTP status: $STATUS"
+          test "$STATUS" -eq 422
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          mkdir -p zap_reports
+          chmod 777 zap_reports
+          docker run --rm --network host \
+            -v "$(pwd)/zap_reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://127.0.0.1:8000/api/v1/items \
+            -r zap_report.html \
+            -J zap_report.json \
+            -I
+
+      - name: Upload OWASP ZAP DAST Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-zap-report
+          path: zap_reports/
+
+      - name: Stop and remove ephemeral container
+        if: always()
+        run: docker rm -f dast-target || true
+
+  # ---------------------------------------------------------------------------
+  # 7. Deploy Gate (Aprovacao Final)
+  # ---------------------------------------------------------------------------
+  deploy-gate:
+    name: 7. Security Gate Passed - Ready for Deploy
+    runs-on: ubuntu-latest
+    needs: dast
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Publish Pipeline Summary
+        run: |
+          {
+            echo "## DevSecOps Security Gate: APPROVED";
+            echo "- Secret Scanning (Gitleaks): PASSED";
+            echo "- SAST (Semgrep): PASSED";
+            echo "- SCA & SBOM (Trivy CycloneDX/SPDX): PASSED";
+            echo "- IaC & Container Security (Hadolint + Trivy + Checkov): PASSED";
+            echo "- DAST (OWASP ZAP + Security Headers): PASSED";
+            echo "- Commit: \`${{ github.sha }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"
