@@ -1,4 +1,4 @@
-FROM python:3.12.8-slim-bookworm
+FROM python:3.12-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,12 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --gid 10001 appgroup && \
-    useradd --uid 10001 --gid appgroup --shell /usr/sbin/nologin --create-home appuser
+RUN apk upgrade --no-cache && \
+    addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip==24.3.1 && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=appuser:appgroup app/ ./app/
 
