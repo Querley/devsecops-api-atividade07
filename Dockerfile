@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=appuser:appgroup app/ ./app/
 
-USER root
+USER appuser
 
 EXPOSE 8000
 
