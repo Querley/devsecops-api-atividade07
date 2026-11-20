@@ -1,3 +1,4 @@
+AWS_SECRET_ACCESS_KEY = 'AKIAIOSFODNN7EXAMPLE'
 import os
 from typing import Dict, List
 from fastapi import FastAPI, HTTPException, Request, Response, status
